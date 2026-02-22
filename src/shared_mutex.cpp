@@ -89,14 +89,14 @@ int main()
     registry.update("api_url", "https://api.v1.com");
 
     // Scenario: High-frequency reader threads
-    auto reader_func = [&]() {
+    auto reader_func = [&](void) {
         for(int i = 0; i < 10000; ++i) {
             std::cout << "Reader saw: " << registry.getattr("api_url") << "\n";
         }
     };
 
     // Scenario: Occasional writer thread
-    auto writer_func = [&]() {
+    auto writer_func = [&](void) {
         for(int i = 0; i < 10000; ++i)
         {
             std::string url = "https://api.v" + std::to_string(i) + ".com";
