@@ -1,178 +1,114 @@
-#include <iostream>
-#include <chrono>
-#include <thread>
-
-/* code from
-https://github.com/vsoftco/qpp/blob/master/include/classes/timer.h
- */
-/**
- * \class oqs::Timer
- * \brief High resolution timer
- * \note Code from
- * https://github.com/vsoftco/qpp/blob/master/include/classes/timer.h
- * \tparam T Tics duration, default is std::chrono::duration<double>,
- * i.e. seconds in double precision
- * \tparam CLOCK_T Clock's type, default is std::chrono::steady_clock,
- * not affected by wall clock changes during runtime
- */
-template <typename T = std::chrono::duration<double>,
-          typename CLOCK_T = std::chrono::steady_clock>
-class Timer {
-  protected:
-    typename CLOCK_T::time_point start_, end_;
-
-  public:
-    /**
-     * \brief Constructs an instance with the current time as the start point
-     */
-    Timer() noexcept : start_{CLOCK_T::now()}, end_{start_} {}
-
-    /**
-     * \brief Resets the chronometer
-     *
-     * Resets the start/end point to the current time
-     *
-     * \return Reference to the current instance
-     */
-    Timer& tic() noexcept {
-        start_ = end_ = CLOCK_T::now();
-
-        return *this;
-    }
-
-    /**
-     * \brief Stops the chronometer
-     *
-     * Set the current time as the end point
-     *
-     * \return Reference to the current instance
-     */
-    Timer& toc() & noexcept {
-        end_ = CLOCK_T::now();
-
-        return *this;
-    }
-
-    /**
-     * \brief Time passed in the duration specified by T
-     *
-     * \return Number of tics (specified by T) that passed between the
-     * instantiation/reset and invocation of oqs::Timer::toc()
-     */
-    double tics() const noexcept {
-        return static_cast<double>(
-            std::chrono::duration_cast<T>(end_ - start_).count());
-    }
-
-    /**
-     * \brief Duration specified by U
-     *
-     * \tparam U Duration, default is T, which defaults to
-     * std::chrono::duration<double>, i.e. seconds in double precision
-     *
-     * \return Duration that passed between the
-     * instantiation/reset and invocation of oqs::Timer::toc()
-     */
-    template <typename U = T>
-    U get_duration() const noexcept {
-        return std::chrono::duration_cast<U>(end_ - start_);
-    }
-
-    /**
-     * \brief Default virtual destructor
-     */
-    virtual ~Timer() = default;
-
-    friend std::ostream& operator<<(std::ostream& os, const Timer& rhs) {
-        return os << rhs.tics();
-    }
-}; // class Timer
-
-#include <iostream>
 #include <mutex>
-#include <shared_mutex>
-#include <syncstream>
+#include <condition_variable>
+#include <iostream>
+#include <vector>
 #include <thread>
- 
-class ThreadSafeCounter
-{
-public:
-    ThreadSafeCounter() = default;
- 
-    // Multiple threads/readers can read the counter's value at the same time.
-    unsigned int get() const
-    {
-        std::shared_lock lock(mutex_);
-        std::cout << "READER: Value: " << value_ << std::endl;
-        return value_;
-    }
+#include <map>
 
-    // Only one thread/writer can increment/write the counter's value.
-    void increment()
-    {
-        std::unique_lock lock(mutex_);
-        ++value_;
-        std::cout << "WRITER: Value: " << value_ << std::endl;
-    }
- 
-    // Only one thread/writer can reset/write the counter's value.
-    void reset()
-    {
-        std::unique_lock lock(mutex_);
-        value_ = 0;
-    }
- 
+class WriterPrioritySharedMutex {
 private:
-    mutable std::shared_mutex mutex_;
-    unsigned int value_;
-};
- 
+    std::mutex mtx;
+    std::condition_variable cv;
+    int readers = 0;
+    int writers_waiting = 0;
+    bool writer_active = false;
 
-
-int main(int argn, char **argv)
-{
-    ThreadSafeCounter counter;
-
-    auto print_counter = [&counter]()
+public:
+    // Exclusive lock
+    void lock()
     {
-        for (int32_t i = 0; i < 10000; ++i)
-        {
-            std::cout <<std::this_thread::get_id() << ' ' << counter.get() << '\n';
+        std::unique_lock<std::mutex> lock(mtx);
+        writers_waiting++;
+
+        // Wait until no active writer AND no active readers
+        std::cout << "Wait to write!" << std::endl;
+        cv.wait(lock, [this] { return !writer_active && readers == 0; });
+        writers_waiting--;
+        writer_active = true;
+        std::cout << "Write Now!" << std::endl;
+    }
+
+    void unlock()
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        writer_active = false;
+        // Notify all: wakes up both waiting writers AND waiting readers
+        // Readers will re-check 'writers_waiting == 0'
+        cv.notify_all(); 
+    }
+
+    // Shared lock
+    void lock_shared()
+    {
+        std::unique_lock<std::mutex> lock(mtx);
+        // Wait if a writer is active OR if writers are waiting
+        std::cout << "Wait to read!" << std::endl;
+
+        cv.wait(lock, [this] { return !writer_active && writers_waiting == 0; });
+        readers++;
+
+        std::cout << "Read Now!" << std::endl;
+    }
+
+    void unlock_shared()
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        readers--;
+        // Only notify if we were the last reader (likely waking a writer)
+        if (readers == 0) {
+            cv.notify_all();
+        }
+    }
+};
+
+// Your class protecting a simple shared resource
+class ThreadSafeRegistry {
+    std::map<std::string, std::string> config;
+    WriterPrioritySharedMutex rw_mutex;
+
+public:
+    // Multiple readers can call this simultaneously as long as no writer is waiting
+    std::string getattr(const std::string& key) {
+        rw_mutex.lock_shared();
+        std::string val = config.count(key) ? config[key] : "NOT_FOUND";
+        rw_mutex.unlock_shared();
+        return val;
+    }
+
+    // This will block new readers immediately to ensure the update happens ASAP
+    void update(const std::string& key, const std::string& val) {
+        rw_mutex.lock();
+        config[key] = val;
+        rw_mutex.unlock();
+    }
+};
+
+int main()
+{
+    ThreadSafeRegistry registry;
+    registry.update("api_url", "https://api.v1.com");
+
+    // Scenario: High-frequency reader threads
+    auto reader_func = [&]() {
+        for(int i = 0; i < 10000; ++i) {
+            std::cout << "Reader saw: " << registry.getattr("api_url") << "\n";
         }
     };
 
-    auto increment_counter = [&counter]()
-    {
-        for (int i = 0; i < 1000; ++i)
-            counter.increment();
+    // Scenario: Occasional writer thread
+    auto writer_func = [&]() {
+        for(int i = 0; i < 10000; ++i)
+        {
+            std::string url = "https://api.v" + std::to_string(i) + ".com";
+            registry.update("api_url", url);
+            std::cout << "Reader saw: " << registry.getattr("api_url") << "\n";
+        }
+
+        std::cout << "--- WRITER UPDATED URL ---" << std::endl;
     };
- 
-    std::thread *thread[32];
-    for (int i = 0; i < 32; ++i)
-    {
-        thread[i] = new std::thread(print_counter);
-    }
-    std::thread writer(increment_counter);
-    std::thread writer2(increment_counter);
-    std::thread writer3(increment_counter);
-    for (int i = 0; i < 32; ++i)
-    {
-        thread[i]->join();
-    }
-    writer.join();
-    writer2.join();
-    writer3.join();
 
-    Timer<std::chrono::milliseconds> t;
-    std::this_thread::sleep_for(std::chrono::milliseconds(1232));
-    t.toc();
+    std::thread r1(reader_func), r2(reader_func), w1(writer_func);
 
-    std::cout << "Time " << t << " ms" << std::endl;
-
-    for (int i = 0; i < 100; ++i) {
-        t.tic();
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        t.toc();
-        std::cout << "Time " << t << " ms" << std::endl;
-    }
+    r1.join(); r2.join(); w1.join();
+    return 0;
 }
