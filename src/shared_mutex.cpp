@@ -21,11 +21,9 @@ public:
         writers_waiting++;
 
         // Wait until no active writer AND no active readers
-        std::cout << "Wait to write!" << std::endl;
         cv.wait(lock, [this] { return !writer_active && readers == 0; });
         writers_waiting--;
         writer_active = true;
-        std::cout << "Write Now!" << std::endl;
     }
 
     void unlock()
@@ -41,13 +39,10 @@ public:
     void lock_shared()
     {
         std::unique_lock<std::mutex> lock(mtx);
-        // Wait if a writer is active OR if writers are waiting
-        std::cout << "Wait to read!" << std::endl;
 
+        // Wait if a writer is active OR if writers are waiting
         cv.wait(lock, [this] { return !writer_active && writers_waiting == 0; });
         readers++;
-
-        std::cout << "Read Now!" << std::endl;
     }
 
     void unlock_shared()
@@ -91,7 +86,7 @@ int main()
     // Scenario: High-frequency reader threads
     auto reader_func = [&](void) {
         for(int i = 0; i < 10000; ++i) {
-            std::cout << "Reader saw: " << registry.getattr("api_url") << "\n";
+            std::cout << "Reader saw: " << registry.getattr("api_url") << std::endl;
         }
     };
 
@@ -101,14 +96,14 @@ int main()
         {
             std::string url = "https://api.v" + std::to_string(i) + ".com";
             registry.update("api_url", url);
-            std::cout << "Reader saw: " << registry.getattr("api_url") << "\n";
+            std::cout << "Write insert: " << registry.getattr("api_url") << "\n";
         }
 
         std::cout << "--- WRITER UPDATED URL ---" << std::endl;
     };
 
-    std::thread r1(reader_func), r2(reader_func), w1(writer_func);
+    std::thread r1(reader_func), r2(reader_func), r3(reader_func), w1(writer_func);
 
-    r1.join(); r2.join(); w1.join();
+    r1.join(); r2.join(), r3.join(); w1.join();
     return 0;
 }
